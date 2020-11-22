@@ -4,6 +4,8 @@ go 1.15
 
 require (
 	cloud.google.com/go v0.21.0 // indirect
+	github.com/carlmjohnson/exitcode v0.20.2
+	github.com/carlmjohnson/flagext v0.20.2
 	github.com/golang/protobuf v1.0.0 // indirect
 	github.com/stretchr/testify v1.6.1 // indirect
 	golang.org/x/net v0.0.0-20180420171651-5f9ae10d9af5 // indirect

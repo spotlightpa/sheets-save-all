@@ -1,16 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
+	"github.com/carlmjohnson/exitcode"
 	"github.com/spotlightpa/sheets-uploader/sheets"
 )
 
 func main() {
-	c := sheets.FromArgs(os.Args[1:])
-	if err := c.Exec(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
+	exitcode.Exit(sheets.CLI(os.Args[1:]))
 }

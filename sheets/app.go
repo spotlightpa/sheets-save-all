@@ -12,13 +12,27 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/carlmjohnson/flagext"
 	"golang.org/x/oauth2/google"
 	spreadsheet "gopkg.in/Iwark/spreadsheet.v2"
 )
 
-func FromArgs(args []string) *Config {
-	conf := &Config{}
-	fl := flag.NewFlagSet("sheets-save-all", flag.ExitOnError)
+const AppName = "sheets-uploader"
+
+func CLI(args []string) error {
+	var conf Config
+	if err := conf.FromArgs(args); err != nil {
+		return err
+	}
+	if err := conf.Exec(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return err
+	}
+	return nil
+}
+
+func (conf *Config) FromArgs(args []string) error {
+	fl := flag.NewFlagSet(AppName, flag.ExitOnError)
 	fl.StringVar(&conf.SheetID, "sheet", "", "Google Sheet ID")
 	fl.StringVar(&conf.ClientSecret, "client-secret", "", "Google client secret (default $GOOGLE_CLIENT_SECRET)")
 	fl.StringVar(&conf.PathTemplate, "path", "{{.Properties.Title}}", "path to save files in")
@@ -29,17 +43,23 @@ func FromArgs(args []string) *Config {
 	quiet := fl.Bool("quiet", false, "don't log activity")
 	fl.Usage = func() {
 		fmt.Fprintf(os.Stderr,
-			`sheets-save-all is a tool to save all sheets in Google Sheets document.
+			`sheets-uploader is a tool to save all sheets in Google Sheets document to cloud storage.
 
 -path and -filename are Go templates and can use any property of the document or sheet object respectively. See gopkg.in/Iwark/spreadsheet.v2 for properties.
 
-Usage of sheets-save-all:
+Usage of sheets-uploader:
 
 `,
 		)
 		fl.PrintDefaults()
 	}
-	_ = fl.Parse(args)
+	if err := fl.Parse(args); err != nil {
+		return err
+	}
+
+	if err := flagext.ParseEnv(fl, AppName); err != nil {
+		return err
+	}
 
 	if conf.ClientSecret == "" {
 		conf.ClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
@@ -51,7 +71,7 @@ Usage of sheets-save-all:
 		conf.Logger = log.New(os.Stderr, "", log.LstdFlags)
 	}
 
-	return conf
+	return nil
 }
 
 var (
