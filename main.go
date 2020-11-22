@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/baltimore-sun-data/sheets-save-all/sheets"
+	"github.com/spotlightpa/sheets-uploader/sheets"
 )
 
 func main() {
