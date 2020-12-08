@@ -1,6 +1,7 @@
 package sheets
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"flag"
@@ -9,10 +10,15 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/carlmjohnson/flagext"
+	"github.com/henvic/ctxsignal"
+	"gocloud.dev/blob"
+	_ "gocloud.dev/blob/fileblob"
+	_ "gocloud.dev/blob/memblob"
+	_ "gocloud.dev/blob/s3blob"
 	"golang.org/x/oauth2/google"
 	spreadsheet "gopkg.in/Iwark/spreadsheet.v2"
 )
@@ -38,6 +44,10 @@ func (conf *Config) FromArgs(args []string) error {
 	fl.StringVar(&conf.PathTemplate, "path", "{{.Properties.Title}}", "path to save files in")
 	fl.StringVar(&conf.FileTemplate, "filename", "{{.Properties.Index}} {{.Properties.Title}}.csv",
 		"file name for files")
+	fl.StringVar(&conf.BucketURL, "bucket-url", "file://.",
+		"`URL` for destination bucket")
+	fl.StringVar(&conf.CacheControl, "cache-control", "max-age=900,public",
+		"`value` for Cache-Control header")
 	fl.BoolVar(&conf.UseCRLF, "crlf", false, "use Windows-style line endings")
 
 	quiet := fl.Bool("quiet", false, "don't log activity")
@@ -83,6 +93,8 @@ type Config struct {
 	ClientSecret string
 	PathTemplate string
 	FileTemplate string
+	BucketURL    string
+	CacheControl string
 	UseCRLF      bool
 	Logger       *log.Logger
 }
@@ -101,6 +113,14 @@ func (c *Config) Exec() error {
 		return fmt.Errorf("file path template problem: %v", err)
 	}
 
+	ctx, cancel := ctxsignal.WithTermination(context.Background())
+	defer cancel()
+
+	b, err := blob.OpenBucket(ctx, c.BucketURL)
+	if err != nil {
+		return fmt.Errorf("could not open bucket: %v", err)
+	}
+
 	c.Logger.Printf("connecting to Google Sheets for %q", c.SheetID)
 
 	conf, err := google.JWTConfigFromJSON([]byte(c.ClientSecret), spreadsheet.Scope)
@@ -117,37 +137,42 @@ func (c *Config) Exec() error {
 
 	c.Logger.Printf("got %q", doc.Properties.Title)
 
-	var buf strings.Builder
-	if err = pt.Execute(&buf, doc); err != nil {
+	var sb strings.Builder
+	if err = pt.Execute(&sb, doc); err != nil {
 		return fmt.Errorf("could not use path template: %v", err)
 	}
-	dir := buf.String()
+	dir := sb.String()
 
-	os.MkdirAll(dir, os.ModePerm)
+	var (
+		buf  bytes.Buffer
+		opts = blob.WriterOptions{
+			CacheControl: c.CacheControl,
+			ContentType:  "text/csv",
+		}
+	)
 	for _, s := range doc.Sheets {
-		buf.Reset()
-		if err = ft.Execute(&buf, s); err != nil {
+		sb.Reset()
+		if err = ft.Execute(&sb, s); err != nil {
 			return fmt.Errorf("could not use file path template: %v", err)
 		}
-		file := buf.String()
+		file := sb.String()
 
-		if err = c.makeCSV(dir, file, s.Rows); err != nil {
+		if err = c.makeCSV(&buf, s.Rows); err != nil {
+			return err
+		}
+
+		fullpath := path.Join(dir, file)
+		c.Logger.Printf("writing %q to %q", fullpath, c.BucketURL)
+		if err = b.WriteAll(ctx, fullpath, buf.Bytes(), &opts); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Config) makeCSV(dir, file string, rows [][]spreadsheet.Cell) (err error) {
-	pathname := filepath.Join(dir, file)
-	c.Logger.Printf("writing file: %s", pathname)
-	f, err := os.Create(pathname)
-	if err != nil {
-		return err
-	}
-	defer deferClose(&err, f.Close)
-
-	w := csv.NewWriter(f)
+func (c *Config) makeCSV(buf *bytes.Buffer, rows [][]spreadsheet.Cell) (err error) {
+	buf.Reset()
+	w := csv.NewWriter(buf)
 	w.UseCRLF = c.UseCRLF
 	defer w.Flush()
 	defer deferClose(&err, w.Error)
