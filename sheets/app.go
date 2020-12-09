@@ -3,6 +3,7 @@ package sheets
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -142,6 +143,7 @@ func (c *Config) Exec() error {
 			CacheControl: c.CacheControl,
 			ContentType:  "text/csv",
 		}
+		h = md5.New()
 	)
 	for _, s := range doc.Sheets {
 		sb.Reset()
@@ -155,6 +157,20 @@ func (c *Config) Exec() error {
 		}
 
 		fullpath := path.Join(dir, file)
+		c.Logger.Printf("checking existing %q in %q", fullpath, c.BucketURL)
+		attrs, err := b.Attributes(ctx, fullpath)
+		if err == nil && attrs.MD5 != nil {
+			// Get checksum
+			h.Reset()
+			if _, err := h.Write(buf.Bytes()); err != nil {
+				return err
+			}
+			if string(h.Sum(nil)) == string(attrs.MD5) {
+				c.Logger.Printf("skipping %q; already uploaded", fullpath)
+				continue
+			}
+		}
+
 		c.Logger.Printf("writing %q to %q", fullpath, c.BucketURL)
 		if err = b.WriteAll(ctx, fullpath, buf.Bytes(), &opts); err != nil {
 			return err
