@@ -12,10 +12,14 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cloudfront"
 	"github.com/carlmjohnson/flagext"
 	"github.com/henvic/ctxsignal"
 	"gocloud.dev/blob"
@@ -55,6 +59,9 @@ func (conf *Config) FromArgs(args []string) error {
 		"file name for files")
 	fl.StringVar(&conf.BucketURL, "bucket-url", "file://.",
 		"`URL` for destination bucket")
+	fl.StringVar(&conf.CloudFrontDist, "dist", "",
+		"`distibution ID` for AWS CloudFront CDN invalidation")
+
 	fl.StringVar(&conf.CacheControl, "cache-control", "max-age=900,public",
 		"`value` for Cache-Control header")
 	fl.BoolVar(&conf.UseCRLF, "crlf", false, "use Windows-style line endings")
@@ -118,6 +125,7 @@ type Config struct {
 	BucketURL          string
 	CacheControl       string
 	UseCRLF            bool
+	CloudFrontDist     string
 	Logger             *log.Logger
 }
 
@@ -165,14 +173,19 @@ func (c *Config) Exec() error {
 	dir := dirBuf.String()
 
 	c.Logger.Printf("%d upload workers", c.NWorkers)
+	type result struct {
+		path string
+		err  error
+	}
 	var (
 		sheetCh   = make(chan *spreadsheet.Sheet)
-		errCh     = make(chan error)
+		resultCh  = make(chan result)
 		waitingOn = 0
 		opts      = blob.WriterOptions{
 			CacheControl: c.CacheControl,
 			ContentType:  "text/csv",
 		}
+		paths []string
 	)
 	for i := 0; i < c.NWorkers; i++ {
 		go func() {
@@ -187,8 +200,9 @@ func (c *Config) Exec() error {
 					if !ok {
 						return
 					}
-					errCh <- c.uploadSheet(
+					fullpath, err := c.uploadSheet(
 						ctx, b, &sb, &buf, ft, s, dir, h, &opts)
+					resultCh <- result{fullpath, err}
 				case <-ctx.Done():
 					return
 				}
@@ -207,12 +221,19 @@ func (c *Config) Exec() error {
 		case workCh <- sheet:
 			waitingOn++
 			doc.Sheets = doc.Sheets[1:]
-		case err := <-errCh:
+		case res := <-resultCh:
 			waitingOn--
-			if err != nil {
+			if res.err != nil {
 				return err
 			}
+			if res.path != "" {
+				paths = append(paths, res.path)
+			}
 		}
+	}
+	if len(paths) > 0 && c.CloudFrontDist != "" {
+		_, err = c.invalidate(paths)
+		return err
 	}
 	return nil
 }
@@ -234,37 +255,39 @@ func (c *Config) googleClient(ctx context.Context) (*http.Client, error) {
 	return client, nil
 }
 
-func (c *Config) uploadSheet(ctx context.Context, b *blob.Bucket, sb *strings.Builder, buf *bytes.Buffer, ft *template.Template, s *spreadsheet.Sheet, dir string, h hash.Hash, opts *blob.WriterOptions) (err error) {
+func (c *Config) uploadSheet(ctx context.Context, b *blob.Bucket, sb *strings.Builder, buf *bytes.Buffer, ft *template.Template, s *spreadsheet.Sheet, dir string, h hash.Hash, opts *blob.WriterOptions) (fullpath string, err error) {
 	sb.Reset()
 	if err = ft.Execute(sb, s); err != nil {
-		return fmt.Errorf("could not use file path template: %v", err)
+		return "", fmt.Errorf("could not use file path template: %v", err)
 	}
 	file := sb.String()
 
 	if err = c.makeCSV(buf, s.Rows); err != nil {
-		return err
+		return "", err
 	}
 
-	fullpath := path.Join(dir, file)
+	fullpath = path.Join(dir, file)
+	var returnPath string
 	c.Logger.Printf("checking existing %q in %q", fullpath, c.BucketURL)
 	attrs, err := b.Attributes(ctx, fullpath)
 	if err == nil && attrs.MD5 != nil {
 		// Get checksum
 		h.Reset()
 		if _, err := h.Write(buf.Bytes()); err != nil {
-			return err
+			return "", err
 		}
 		if string(h.Sum(nil)) == string(attrs.MD5) {
 			c.Logger.Printf("skipping %q; already uploaded", fullpath)
-			return nil
+			return "", nil
 		}
+		returnPath = fullpath
 	}
 
 	c.Logger.Printf("writing %q to %q", fullpath, c.BucketURL)
 	if err = b.WriteAll(ctx, fullpath, buf.Bytes(), opts); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return returnPath, nil
 }
 
 func (c *Config) makeCSV(buf *bytes.Buffer, rows [][]spreadsheet.Cell) (err error) {
@@ -304,4 +327,44 @@ func deferClose(err *error, f func() error) {
 	if *err == nil && newErr != nil {
 		*err = fmt.Errorf("problem closing: %v", newErr)
 	}
+}
+
+func makepaths(paths []string) *cloudfront.Paths {
+	items := make([]*string, len(paths))
+	for i := range paths {
+		items[i] = &paths[i]
+	}
+	quantity := int64(len(items))
+	return &cloudfront.Paths{
+		Items:    items,
+		Quantity: &quantity,
+	}
+}
+
+func (c *Config) invalidate(paths []string) (id string, err error) {
+	for i, path := range paths {
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		path = url.PathEscape(path)
+		path = strings.ReplaceAll(path, "%2F", "/")
+		paths[i] = path
+	}
+	c.Logger.Printf("invalidating %v in CloudFront %s", paths, c.CloudFrontDist)
+
+	cf := cloudfront.New(session.Must(session.NewSession()))
+	callerReference := time.Now().Format("20060102150405")
+
+	result, err := cf.CreateInvalidation(&cloudfront.CreateInvalidationInput{
+		DistributionId: &c.CloudFrontDist,
+		InvalidationBatch: &cloudfront.InvalidationBatch{
+			CallerReference: &callerReference,
+			Paths:           makepaths(paths),
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return *result.Invalidation.Id, nil
 }
