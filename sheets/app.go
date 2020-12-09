@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/csv"
 	"flag"
 	"fmt"
 	"hash"
 	"html/template"
 	"log"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -42,7 +44,12 @@ func (conf *Config) FromArgs(args []string) error {
 	fl := flag.NewFlagSet(AppName, flag.ExitOnError)
 	fl.IntVar(&conf.NWorkers, "workers", 10, "number of upload workers")
 	fl.StringVar(&conf.SheetID, "sheet", "", "Google Sheet ID")
-	fl.StringVar(&conf.ClientSecret, "client-secret", "", "Google client secret (default $GOOGLE_CLIENT_SECRET)")
+	flagext.Callback(fl, "google-client-secret", "", "`base64 encoded JSON` of Google client secret",
+		func(s string) error {
+			var err error
+			conf.GoogleClientSecret, err = base64.StdEncoding.DecodeString(s)
+			return err
+		})
 	fl.StringVar(&conf.PathTemplate, "path", "{{.Properties.Title}}", "path to save files in")
 	fl.StringVar(&conf.FileTemplate, "filename", "{{.Properties.Index}} {{.Properties.Title}}.csv",
 		"file name for files")
@@ -59,7 +66,27 @@ func (conf *Config) FromArgs(args []string) error {
 		fmt.Fprintf(os.Stderr,
 			`sheets-uploader is a tool to save all sheets in Google Sheets document to cloud storage.
 
--path and -filename are Go templates and can use any property of the document or sheet object respectively. See gopkg.in/Iwark/spreadsheet.v2 for properties.
+-path and -filename are Go templates and can use any property of the document
+or sheet object respectively. See gopkg.in/Iwark/spreadsheet.v2 for properties.
+
+If -google-client-secret is not specified, the default Google credentials will be used:
+
+1. A JSON file whose path is specified by the GOOGLE_APPLICATION_CREDENTIALS
+   environment variable.
+2. A JSON file in a location known to the gcloud command-line tool.On Windows,
+   this is %%APPDATA%%/gcloud/application_default_credentials.json. On other
+   systems, $HOME/.config/gcloud/application_default_credentials.json.
+
+If -google-client-secret is specified, it must be a base64 encoded version of
+application_default_credentials.json because the '\n' in the JSON is often
+mangled by the environment.
+
+When connecting to AWS S3, the AWS default credentials are used:
+
+1. Environment Credentials - AWS_ACCESS_KEY_ID or AWS_ACCESS_KEY and
+   AWS_SECRET_ACCESS_KEY or AWS_SECRET_KEY.
+2. Shared Credentials file (~/.aws/credentials)
+3. EC2 Instance Role Credentials
 
 Usage of sheets-uploader:
 
@@ -79,23 +106,19 @@ Usage of sheets-uploader:
 		return err
 	}
 
-	if conf.ClientSecret == "" {
-		conf.ClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
-	}
-
 	return nil
 }
 
 type Config struct {
-	NWorkers     int
-	SheetID      string
-	ClientSecret string
-	PathTemplate string
-	FileTemplate string
-	BucketURL    string
-	CacheControl string
-	UseCRLF      bool
-	Logger       *log.Logger
+	NWorkers           int
+	SheetID            string
+	GoogleClientSecret []byte
+	PathTemplate       string
+	FileTemplate       string
+	BucketURL          string
+	CacheControl       string
+	UseCRLF            bool
+	Logger             *log.Logger
 }
 
 func (c *Config) Exec() error {
@@ -121,14 +144,12 @@ func (c *Config) Exec() error {
 		return fmt.Errorf("could not open bucket: %v", err)
 	}
 
-	c.Logger.Printf("connecting to Google Sheets for %q", c.SheetID)
-
-	conf, err := google.JWTConfigFromJSON([]byte(c.ClientSecret), spreadsheet.Scope)
+	client, err := c.googleClient(ctx)
 	if err != nil {
-		return fmt.Errorf("could not parse credentials: %v", err)
+		return err
 	}
 
-	client := conf.Client(ctx)
+	c.Logger.Printf("connecting to Google Sheets for %q", c.SheetID)
 	service := spreadsheet.NewServiceWithClient(client)
 	doc, err := service.FetchSpreadsheet(c.SheetID)
 	if err != nil {
@@ -194,6 +215,23 @@ func (c *Config) Exec() error {
 		}
 	}
 	return nil
+}
+
+func (c *Config) googleClient(ctx context.Context) (*http.Client, error) {
+	if len(c.GoogleClientSecret) > 0 {
+		c.Logger.Printf("using base64 Google credentials")
+		conf, err := google.JWTConfigFromJSON(c.GoogleClientSecret, spreadsheet.Scope)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse Google credentials: %v", err)
+		}
+		return conf.Client(ctx), nil
+	}
+	c.Logger.Printf("using default Google credentials")
+	client, err := google.DefaultClient(ctx, spreadsheet.Scope)
+	if err != nil {
+		return nil, fmt.Errorf("could not find Google credentials: %v", err)
+	}
+	return client, nil
 }
 
 func (c *Config) uploadSheet(ctx context.Context, b *blob.Bucket, sb *strings.Builder, buf *bytes.Buffer, ft *template.Template, s *spreadsheet.Sheet, dir string, h hash.Hash, opts *blob.WriterOptions) (err error) {
