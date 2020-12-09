@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
-	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -50,7 +49,9 @@ func (conf *Config) FromArgs(args []string) error {
 		"`value` for Cache-Control header")
 	fl.BoolVar(&conf.UseCRLF, "crlf", false, "use Windows-style line endings")
 
-	quiet := fl.Bool("quiet", false, "don't log activity")
+	conf.Logger = log.New(os.Stderr, AppName+" ", log.LstdFlags)
+	flagext.LoggerVar(fl, conf.Logger, "quiet", flagext.LogSilent,
+		"don't log activity")
 	fl.Usage = func() {
 		fmt.Fprintf(os.Stderr,
 			`sheets-uploader is a tool to save all sheets in Google Sheets document to cloud storage.
@@ -71,22 +72,16 @@ Usage of sheets-uploader:
 		return err
 	}
 
+	if err := flagext.MustHave(fl, "sheet"); err != nil {
+		return err
+	}
+
 	if conf.ClientSecret == "" {
 		conf.ClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
 	}
 
-	if *quiet {
-		conf.Logger = log.New(ioutil.Discard, "", 0)
-	} else {
-		conf.Logger = log.New(os.Stderr, "", log.LstdFlags)
-	}
-
 	return nil
 }
-
-var (
-	ErrNoSheet error = fmt.Errorf("No sheet ID provided")
-)
 
 type Config struct {
 	SheetID      string
@@ -100,9 +95,6 @@ type Config struct {
 }
 
 func (c *Config) Exec() error {
-	if c.SheetID == "" {
-		return ErrNoSheet
-	}
 
 	pt, err := template.New("path").Parse(c.PathTemplate)
 	if err != nil {
@@ -116,6 +108,7 @@ func (c *Config) Exec() error {
 	ctx, cancel := ctxsignal.WithTermination(context.Background())
 	defer cancel()
 
+	c.Logger.Printf("opening cloud storage %q", c.BucketURL)
 	b, err := blob.OpenBucket(ctx, c.BucketURL)
 	if err != nil {
 		return fmt.Errorf("could not open bucket: %v", err)
@@ -128,7 +121,7 @@ func (c *Config) Exec() error {
 		return fmt.Errorf("could not parse credentials: %v", err)
 	}
 
-	client := conf.Client(context.Background())
+	client := conf.Client(ctx)
 	service := spreadsheet.NewServiceWithClient(client)
 	doc, err := service.FetchSpreadsheet(c.SheetID)
 	if err != nil {
