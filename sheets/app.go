@@ -38,7 +38,7 @@ func CLI(args []string) error {
 		return err
 	}
 	if err := conf.Exec(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %+v\n", err)
 		return err
 	}
 	return nil
@@ -224,7 +224,7 @@ func (c *Config) Exec() error {
 		case res := <-resultCh:
 			waitingOn--
 			if res.err != nil {
-				return err
+				return res.err
 			}
 			if res.path != "" {
 				paths = append(paths, res.path)
