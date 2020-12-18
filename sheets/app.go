@@ -79,7 +79,7 @@ func (conf *Config) FromArgs(args []string) error {
 	flagext.LoggerVar(fl, conf.Logger, "quiet", flagext.LogSilent,
 		"don't log activity")
 	fl.Usage = func() {
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(fl.Output(),
 			`sheets-uploader is a tool to save all sheets in Google Sheets document to cloud storage.
 
 -path and -filename are Go templates and can use any property of the document
@@ -104,11 +104,19 @@ When connecting to AWS S3, the AWS default credentials are used:
 2. Shared Credentials file (~/.aws/credentials)
 3. EC2 Instance Role Credentials
 
-Usage of sheets-uploader:
+Bucket URL can set S3 bucket and region like s3://bucket-name?region=us-east-1.
+The special bucket URLs 'mem://' (for dry run testing) and 'file://.' for local
+storage can also be used.
+
+Options for sheets-uploader:
 
 `,
 		)
 		fl.PrintDefaults()
+		fmt.Fprintf(fl.Output(), `
+Options can also be passed as environment variables prepended with
+SHEETS_UPLOADER, e.g. SHEETS_UPLOADER_BUCKET_URL.
+`)
 	}
 	if err := fl.Parse(args); err != nil {
 		return err

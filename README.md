@@ -41,7 +41,11 @@ When connecting to AWS S3, the AWS default credentials are used:
 2. Shared Credentials file (~/.aws/credentials)
 3. EC2 Instance Role Credentials
 
-Usage of sheets-uploader:
+Bucket URL can set S3 bucket and region like s3://bucket-name?region=us-east-1.
+The special bucket URLs 'mem://' (for dry run testing) and 'file://.' for local
+storage can also be used.
+
+Options for sheets-uploader:
 
   -bucket-url URL
         URL for destination bucket (default "file://.")
@@ -59,10 +63,13 @@ Usage of sheets-uploader:
         path to save files in (default "{{.Properties.Title}}")
   -quiet
         don't log activity
-  -sheet string
+  -sheet value
         Google Sheet ID
   -workers int
         number of upload workers (default 10)
+
+Options can also be passed as environment variables prepended with
+SHEETS_UPLOADER, e.g. SHEETS_UPLOADER_BUCKET_URL.
 ```
 
 ## Features
@@ -78,3 +85,5 @@ Usage of sheets-uploader:
 - Automatically skips files that have been uploaded
 
 - Automatic CloudFront CDN invalidation
+
+- Flags can be passed directly (`-sheet`, `--sheet`) or as environment variables `SHEETS_UPLOADER_SHEET=... sheets-uploader`
