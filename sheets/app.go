@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/csv"
+	"errors"
 	"flag"
 	"fmt"
 	"hash"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -46,7 +48,15 @@ func CLI(args []string) error {
 func (conf *Config) FromArgs(args []string) error {
 	fl := flag.NewFlagSet(AppName, flag.ExitOnError)
 	fl.IntVar(&conf.NWorkers, "workers", 10, "number of upload workers")
-	fl.StringVar(&conf.SheetID, "sheet", "", "Google Sheet ID")
+	flagext.Callback(fl, "sheet", "", "Google Sheet ID", func(s string) error {
+		// https://stackoverflow.com/a/16840612/4893152
+		re := regexp.MustCompile(`[-\w]{25,}`)
+		if id := re.FindString(s); id != "" {
+			conf.SheetID = id
+			return nil
+		}
+		return errors.New("could not parse ID for Google Sheet")
+	})
 	flagext.Callback(fl, "google-client-secret", "", "`base64 encoded JSON` of Google client secret",
 		func(s string) error {
 			var err error
