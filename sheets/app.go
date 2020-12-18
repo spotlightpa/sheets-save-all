@@ -25,7 +25,6 @@ import (
 	"gocloud.dev/blob"
 	_ "gocloud.dev/blob/fileblob"
 	_ "gocloud.dev/blob/memblob"
-	_ "gocloud.dev/blob/s3blob"
 	"golang.org/x/oauth2/google"
 	spreadsheet "gopkg.in/Iwark/spreadsheet.v2"
 )
@@ -129,7 +128,7 @@ type Config struct {
 	Logger             *log.Logger
 }
 
-func (c *Config) Exec() error {
+func (c *Config) Exec() (err error) {
 	if c.NWorkers < 1 {
 		return fmt.Errorf("invalid number of workers: %d", c.NWorkers)
 	}
@@ -151,6 +150,7 @@ func (c *Config) Exec() error {
 	if err != nil {
 		return fmt.Errorf("could not open bucket: %v", err)
 	}
+	defer deferClose(&err, b.Close)
 
 	client, err := c.googleClient(ctx)
 	if err != nil {
